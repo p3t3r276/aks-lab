@@ -3,13 +3,17 @@ kind: Deployment
 metadata: { name: lab-api, namespace: lab }
 spec:
   replicas: 1
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: { maxSurge: 1, maxUnavailable: 0 }
   selector: { matchLabels: { app: lab-api } }
   template:
     metadata: { labels: { app: lab-api } }
     spec:
       containers:
         - name: api
-          image: akslab20545.azurecr.io/lab-api:v1
+          image: __API_IMAGE__
           ports: [{ containerPort: 8080 }]
           envFrom: [{ secretRef: { name: api-secrets } }]
           readinessProbe:

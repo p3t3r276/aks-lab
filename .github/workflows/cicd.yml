@@ -1,0 +1,109 @@
+name: cicd
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  id-token: write    # bắt buộc cho OIDC
+  contents: read
+
+env:
+  REGISTRY: ${{ vars.ACR_NAME }}.azurecr.io
+  NAMESPACE: lab
+  TAG: ${{ github.sha }}
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with: { dotnet-version: 8.0.x }
+      - run: dotnet restore
+      - run: dotnet build --no-restore -c Release
+      - run: dotnet test --no-build -c Release
+
+  build-push:
+    needs: build-test
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - run: az acr login --name ${{ vars.ACR_NAME }}
+      - name: Build & push images
+        run: |
+          docker build --target runtime  -t $REGISTRY/lab-api:$TAG .
+          docker build --target migrator -t $REGISTRY/lab-migrator:$TAG .
+          docker push $REGISTRY/lab-api:$TAG
+          docker push $REGISTRY/lab-migrator:$TAG
+
+  deploy:
+    needs: build-push
+    runs-on: ubuntu-latest
+    environment: production
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false     # không hủy deploy đang chạy dở
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - uses: azure/setup-kubectl@v4
+      - uses: azure/aks-set-context@v4
+        with:
+          resource-group: ${{ vars.RESOURCE_GROUP }}
+          cluster-name: ${{ vars.CLUSTER_NAME }}
+
+      - name: Namespace & secrets
+        env:
+          SA: ${{ secrets.SQL_SA_PASSWORD }}
+          MP: ${{ secrets.MONGO_PASSWORD }}
+        run: |
+          kubectl apply -f k8s/00-namespace.yaml
+          kubectl create secret generic db-secrets -n $NAMESPACE \
+            --from-literal=SA_PASSWORD="$SA" \
+            --from-literal=MONGO_PASSWORD="$MP" \
+            --dry-run=client -o yaml | kubectl apply -f -
+          kubectl create secret generic api-secrets -n $NAMESPACE \
+            --from-literal=ConnectionStrings__SqlServer="Server=sqlserver,1433;Database=LabDb;User Id=sa;Password=$SA;TrustServerCertificate=True" \
+            --from-literal=ConnectionStrings__Mongo="mongodb://root:$MP@mongo:27017/?authSource=admin" \
+            --from-literal=ConnectionStrings__Redis="redis:6379,abortConnect=false" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Data stores
+        run: |
+          kubectl apply -f k8s/10-sqlserver.yaml -f k8s/20-mongodb.yaml -f k8s/30-redis.yaml
+          kubectl rollout status statefulset/sqlserver -n $NAMESPACE --timeout=300s
+          kubectl rollout status statefulset/mongo -n $NAMESPACE --timeout=180s
+
+      - name: Run DB migration
+        run: |
+          kubectl delete job db-migrate -n $NAMESPACE --ignore-not-found
+          sed "s|__MIGRATOR_IMAGE__|$REGISTRY/lab-migrator:$TAG|g" k8s/35-migrate-job.yaml | kubectl apply -f -
+          kubectl wait --for=condition=complete job/db-migrate -n $NAMESPACE --timeout=180s
+
+      - name: Migration logs (on failure)
+        if: failure()
+        run: kubectl logs job/db-migrate -n $NAMESPACE --tail=100 || true
+
+      - name: Deploy API
+        id: deploy_api
+        run: |
+          sed "s|__API_IMAGE__|$REGISTRY/lab-api:$TAG|g" k8s/40-api.yaml | kubectl apply -f -
+          kubectl rollout status deployment/lab-api -n $NAMESPACE --timeout=180s
+
+      - name: Rollback on failed rollout
+        if: failure() && steps.deploy_api.outcome == 'failure'
+        run: kubectl rollout undo deployment/lab-api -n $NAMESPACE

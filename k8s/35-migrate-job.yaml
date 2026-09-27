@@ -1,0 +1,16 @@
+apiVersion: batch/v1
+kind: Job
+metadata: { name: db-migrate, namespace: lab }
+spec:
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 600
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: migrate
+          image: __MIGRATOR_IMAGE__
+          env:
+            - name: SQL_CONN
+              valueFrom: { secretKeyRef: { name: api-secrets, key: ConnectionStrings__SqlServer } }
+          args: ["--connection", "$(SQL_CONN)"]

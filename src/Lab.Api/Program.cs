@@ -18,9 +18,6 @@ builder.Services.AddSingleton<IConnectionMultiplexer>(_ =>
 
 var app = builder.Build();
 
-using (var scope = app.Services.CreateScope())
-    scope.ServiceProvider.GetRequiredService<AppDbContext>().Database.Migrate();
-
 IMongoCollection<AccessLog> Logs(IMongoClient c) => c.GetDatabase("labdb").GetCollection<AccessLog>("access_logs");
 
 app.MapGet("/healthz", () => Results.Ok("ok"));
