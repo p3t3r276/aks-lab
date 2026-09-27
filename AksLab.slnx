@@ -1,0 +1,5 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Lab.Api/Lab.Api.csproj" />
+  </Folder>
+</Solution>
