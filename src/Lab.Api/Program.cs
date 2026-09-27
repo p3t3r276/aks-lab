@@ -56,6 +56,12 @@ app.MapGet("/logs", async (IMongoClient mongo) =>
     return logs.Select(x => new { x.Path, x.CacheHit, x.At });
 });
 
+app.MapGet("/version", (IConfiguration config) => Results.Ok(new
+{
+    pod = Environment.MachineName,              // trong container, hostname = tên pod
+    version = config["APP_VERSION"] ?? "local"  // commit SHA do pipeline truyền vào
+}));
+
 
 app.Run();
 
